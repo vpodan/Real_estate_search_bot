@@ -75,7 +75,6 @@ async def chat(request: PromptRequest):
             }
             logging.debug(f"Wydobyte kryteria: {criteria}")
 
-            # Используем общую функцию поиска
             search_result = search_listings(criteria)
             
             return {
@@ -88,12 +87,11 @@ async def chat(request: PromptRequest):
             return {"response": message.content}
 
     except Exception as ex:
-        logging.error(f"Ошибка в /chat: {ex}")
+        logging.error(f"Błąd w /chat: {ex}")
         return {"error": str(ex)}
 
 
 def _get_openai_function_schema():
-    """Возвращает схему функции для OpenAI"""
     return {
         "name": "extract_search_criteria",
         "description": (
@@ -116,7 +114,12 @@ def _get_openai_function_schema():
                 },
                 "district": {
                     "type": ["string", "null"],
-                    "description": "Dzielnica/Osiedle, np. 'Wrzeszcz'. Jeśli nie podano null."
+                    "description": "Dzielnica/Osiedle, np. 'Wrzeszcz'. Jeśli użytkownik wymienia kilka dzielnic (np. 'Bemowo lub Mokotów'), zwróć pierwszą wymienioną. Jeśli nie podano null."
+                },
+                "districts": {
+                    "type": ["array", "null"],
+                    "items": {"type": "string"},
+                    "description": "Lista dzielnic jeśli użytkownik wymienia kilka (np. ['Bemowo', 'Mokotów'] dla 'Bemowo lub Mokotów'). Jeśli tylko jedna dzielnica lub nie podano - null."
                 },
                 "neighbourhood": {
                     "type": ["string", "null"],
@@ -140,7 +143,7 @@ def _get_openai_function_schema():
                             },
                 "floor": {
                     "type": ["integer", "null"],
-                    "description": "Piętro, np. 0=parter, 1, 2, …, 10. Jeśli nie podano – null."
+                    "description": "Piętro, np. 0=parter, 1, 2, …, 10. Jeśli nie podano – null. UWAGA: Nie interpretuj semantycznych opisów jak 'wysokie piętro', 'na górze' - to są opisy dla wyszukiwania semantycznego, nie konkretne numery pięter."
                 },
                 "max_price": {
                     "type": "integer",
@@ -163,11 +166,11 @@ def _get_openai_function_schema():
                 },
                 "min_build_year": {
                     "type": ["integer", "null"],
-                    "description": "Minimalny rok budowy, np. 2008. Jeśli nie podano null."
+                    "description": "Minimalny rok budowy (nie starsze niż X rok = min_build_year X), np. 2008. Jeśli nie podano null."
                 },
                 "max_build_year": {
                     "type": ["integer", "null"],
-                    "description": "Maksymalny rok budowy, np. 2020. Jeśli nie podano null."
+                    "description": "Maksymalny rok budowy (nie nowsze niż X rok = max_build_year X), np. 2020. Jeśli nie podano null."
                 },
                 "building_material": {
                     "type": ["string", "null"],
@@ -220,17 +223,7 @@ def _get_openai_function_schema():
 
 
 def extract_criteria_from_prompt(prompt_text: str) -> dict:
-    """
-    Извлекает критерии поиска из текстового запроса пользователя
-    
-    Args:
-        prompt_text (str): Текстовый запрос пользователя
-        
-    Returns:
-        dict: Словарь с извлеченными критериями
-    """
     try:
-        # Вызываем OpenAI для извлечения критериев
         completion = openai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt_text}],
@@ -240,19 +233,18 @@ def extract_criteria_from_prompt(prompt_text: str) -> dict:
 
         message = completion.choices[0].message
 
-        # Если OpenAI вернуло вызов функции
         if message.function_call:
             raw_args = message.function_call.arguments
             try:
                 args_dict = json.loads(raw_args)
             except json.JSONDecodeError:
-                raise ValueError("Не удалось декодировать JSON из function_call.arguments")
+                raise ValueError("Nie udało się zdekodować JSON-a z function_call.arguments")
 
-            # Собираем полный набор критериев
             criteria = {
                 "province":         args_dict.get("province"),
                 "city":             args_dict.get("city"),
                 "district":         args_dict.get("district"),
+                "districts":        args_dict.get("districts"),
                 "neighbourhood":    args_dict.get("neighbourhood"),
                 "street":           args_dict.get("street"),
                 "house_number":     args_dict.get("house_number"),
@@ -278,44 +270,41 @@ def extract_criteria_from_prompt(prompt_text: str) -> dict:
                 "furnished":        args_dict.get("furnished"),
             }
             
-            logging.debug(f"Извлеченные критерии: {criteria}")
+            logging.debug(f"Wydobyte kryteria: {criteria}")
             return criteria
 
         else:
-            raise ValueError("OpenAI не вернуло function_call")
+            raise ValueError("OpenAI nie zwróciło function_call")
 
     except Exception as ex:
-        logging.error(f"Ошибка при извлечении критериев: {ex}")
+        logging.error(f"Błąd podczas wydobywania kryteriów: {ex}")
         raise
 
 
 def search_listings(criteria: dict) -> dict:
-    """
-    Выполняет поиск объявлений по критериям
-    
-    Args:
-        criteria (dict): Критерии поиска
-        
-    Returns:
-        dict: Результаты поиска с общим количеством и списком объявлений
-    """
+   
     try:
-        # Создаем фильтр MongoDB, учитывая только поля не-null
+        # Tworzymy filtr MongoDB, uwzględniając tylko pola nie-null
         query_filter: dict = {}
 
-        # Поля текстовые: если не None и непустые ищем точного совпадения
+        # Pola tekstowe: jeśli nie None i niepuste szukamy dokładnego dopasowania
         if criteria.get("province"):
             query_filter["province"] = criteria["province"]
         if criteria.get("city"):
             query_filter["city"] = criteria["city"]
-        if criteria.get("district"):
+        
+        # Dzielnice: obsługujemy zarówno jedną dzielnicę, jak i kilka
+        if criteria.get("districts") and len(criteria["districts"]) > 0:
+            query_filter["district"] = {"$in": criteria["districts"]}
+        elif criteria.get("district"):
             query_filter["district"] = criteria["district"]
+            
         if criteria.get("neighbourhood"):
             query_filter["neighbourhood"] = criteria["neighbourhood"]    
         if criteria.get("street"):
             query_filter["street"] = criteria["street"]
 
-        # Поля числовые: если не None и не 0 добавляем условие
+        # Pola numeryczne: jeśli nie None i nie 0 dodajemy warunek
         if criteria.get("house_number") is not None:
             query_filter["house_number"] = criteria["house_number"]
         if criteria.get("room_count") is not None and criteria.get("room_count") != 0:
@@ -327,7 +316,7 @@ def search_listings(criteria: dict) -> dict:
         if criteria.get("max_price") is not None:
             query_filter["price"] = {"$lte": criteria["max_price"]}
         
-        # Новые фильтры для продажи
+        # Nowe filtry dla sprzedaży
         if criteria.get("market_type") is not None:
             query_filter["market_type"] = criteria["market_type"]
         if criteria.get("stan_wykonczenia") is not None:
@@ -339,7 +328,7 @@ def search_listings(criteria: dict) -> dict:
         if criteria.get("ogrzewanie") is not None:
             query_filter["ogrzewanie"] = criteria["ogrzewanie"]
         
-        # Фильтр года постройки
+        # Filtr roku budowy
         if criteria.get("min_build_year") is not None or criteria.get("max_build_year") is not None:
             build_year_filter = {}
             if criteria.get("min_build_year") is not None:
@@ -348,11 +337,11 @@ def search_listings(criteria: dict) -> dict:
                 build_year_filter["$lte"] = str(criteria["max_build_year"])
             query_filter["build_year"] = build_year_filter
         
-        # Фильтр чинша (только для аренды)
+        # Filtr czynszu (tylko dla wynajmu)
         if criteria.get("max_czynsz") is not None:
             query_filter["czynsz"] = {"$lte": criteria["max_czynsz"]}
 
-        # Boolean фильтры для дополнительных характеристик
+        # Filtry boolean dla dodatkowych cech
         if criteria.get("has_garage") is not None:
             query_filter["has_garage"] = criteria["has_garage"]
         if criteria.get("has_parking") is not None:
@@ -368,9 +357,9 @@ def search_listings(criteria: dict) -> dict:
         if criteria.get("furnished") is not None:
             query_filter["furnished"] = criteria["furnished"]
 
-        logging.debug(f"Созданный фильтр Mongo: {query_filter}")
+        logging.debug(f"Utworzony filtr Mongo: {query_filter}")
 
-        # Определяем, в какой коллекции искать: sale_listings, rent_listings или обе
+        # Określamy, w jakiej kolekcji szukać: sale_listings, rent_listings lub obie
         listings = []
         to_search_collections = []
 
@@ -381,13 +370,17 @@ def search_listings(criteria: dict) -> dict:
         else:
             to_search_collections = ["sale_listings", "rent_listings"]
 
-        # Выполняем запросы к соответствующим коллекциям и собираем максимум 5 предложений
+        # Wykonujemy zapytania do odpowiednich kolekcji
         for coll_name in to_search_collections:
             coll = mongo_db[coll_name]
-            cursor = coll.find(query_filter).limit(5)
+            cursor = coll.find(query_filter)
             for doc in cursor:
                 raw_link = doc.get("link", "")
-                full_link = f"https://otodom.pl{raw_link}"
+                # Sprawdzamy czy link już jest pełny
+                if raw_link.startswith("http"):
+                    full_link = raw_link
+                else:
+                    full_link = f"https://www.otodom.pl{raw_link}"
                 listings.append({
                     "source_collection": coll_name,
                     "link": full_link,
@@ -413,10 +406,6 @@ def search_listings(criteria: dict) -> dict:
                     "furnished": doc.get("furnished"),
                     "description": doc.get("description")
                 })
-            if len(listings) >= 5:
-                break
-
-        listings = listings[:5]
 
         return {
             "total": len(listings),
@@ -424,7 +413,7 @@ def search_listings(criteria: dict) -> dict:
         }
 
     except Exception as ex:
-        logging.error(f"Ошибка при поиске объявлений: {ex}")
+        logging.error(f"Błąd podczas wyszukiwania ogłoszeń: {ex}")
         return {"total": 0, "listings": []}
 
 

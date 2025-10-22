@@ -1,358 +1,173 @@
-# hybrid_search.py
-from typing import List, Dict, Optional, Union
-from pymongo import MongoClient
+import sys
+import os
+import logging
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("pymongo").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("chromadb").setLevel(logging.WARNING)
+logging.getLogger("chromadb.telemetry").setLevel(logging.WARNING)
+logging.getLogger("chromadb.config").setLevel(logging.WARNING)
+
+from main import extract_criteria_from_prompt, search_listings
 from real_estate_vector_db import RealEstateVectorDB
 
-# Подключение к MongoDB
-client = MongoClient("mongodb://localhost:27017/")
-db = client["real_estate"]
-collection_rent = db["rent_listings"]
-collection_sale = db["sale_listings"]
-
-class HybridRealEstateSearch:
-    """
-    Класс для выполнения гибридного поиска по объявлениям недвижимости
-    Комбинирует структурированный поиск в MongoDB с семантическим поиском в векторной БД
-    """
+def hybrid_search(query: str):
     
-    def __init__(self):
-        """Инициализация поисковой системы"""
-        self.vector_db = RealEstateVectorDB()
-        self.rent_collection = collection_rent
-        self.sale_collection = collection_sale
+    results = {
+        "query": query,
+        "mongo_filtered_count": 0,
+        "semantic_results": [],
+        "final_results": []
+    }
     
-    def search(self, 
-               filters: Dict = None, 
-               semantic_query: str = None,
-               listing_type: str = "both",
-               limit: int = 100) -> List[Dict]:
-        """
-        Основная функция гибридного поиска
-        
-        Args:
-            filters (Dict): Структурированные фильтры для MongoDB
-            semantic_query (str): Семантический запрос для векторного поиска
-            listing_type (str): "rent", "sale" или "both"
-            limit (int): Максимальное количество результатов
-            
-        Returns:
-            List[Dict]: Результаты поиска
-        """
-        print(f"🔍 Начинаем гибридный поиск:")
-        print(f"   Фильтры: {filters}")
-        print(f"   Семантический запрос: '{semantic_query}'")
-        print(f"   Тип объявлений: {listing_type}")
-        
-        # Определяем в каких коллекциях искать
-        collections_to_search = self._get_collections_to_search(listing_type)
-        
-        all_results = []
-        
-        for collection_name, collection in collections_to_search.items():
-            print(f"\n📊 Поиск в коллекции: {collection_name}")
-            
-            # Этап 1: Структурированная фильтрация в MongoDB
-            # Если есть семантический запрос, ищем ВСЕ возможные результаты в MongoDB
-            # чтобы потом провести семантический поиск по всем найденным
-            if semantic_query and semantic_query.strip():
-                mongo_limit = 10000  # Большой лимит для получения всех возможных результатов
-            else:
-                mongo_limit = limit  # Если нет семантического поиска, используем обычный лимит
-            
-            mongo_results = self._mongodb_filter(collection, filters, mongo_limit)
-            mongo_ids = [str(result["_id"]) for result in mongo_results]
-            
-
-            
-            if not mongo_ids:
-                print(f"   Нет результатов в {collection_name}")
-                continue
-            
-            # Этап 2: Семантический поиск (если есть запрос)
-            if semantic_query and semantic_query.strip():
-                print(f"   Выполняем семантический поиск...")
-                
-                vector_results = self.vector_db.semantic_search(
-                    query=semantic_query,
-                    collection_type=collection_name,
-                    mongo_ids=mongo_ids,  # Ищем только среди отфильтрованных MongoDB
-                    top_k=min(limit, len(mongo_ids))
-                )
-                
-                print(f"   Векторный поиск нашел: {len(vector_results)} релевантных")
-                
-                # Объединяем данные из MongoDB с векторными результатами
-                combined_results = self._combine_mongo_and_vector_results(
-                    mongo_results, vector_results, collection_name
-                )
-                
-            else:
-                # Если нет семантического запроса, возвращаем только MongoDB результаты
-                print(f"   Семантический поиск пропущен")
-                combined_results = self._format_mongo_results(mongo_results, collection_name)
-            
-            all_results.extend(combined_results)
-        
-        # Сортируем и ограничиваем результаты
-        final_results = self._rank_and_limit_results(all_results, limit)
-        
-        print(f"\n✅ Итого найдено: {len(final_results)} объявлений")
-        return final_results
+    print(f"🔍 HIBRIDOWE WYSZUKIWANIE: '{query}'")
+    print("-" * 60)
     
-    def _get_collections_to_search(self, listing_type: str) -> Dict:
-        """Определяет в каких коллекциях MongoDB искать"""
-        if listing_type == "rent":
-            return {"rent": self.rent_collection}
-        elif listing_type == "sale":
-            return {"sale": self.sale_collection}
-        else:  # both
-            return {"rent": self.rent_collection, "sale": self.sale_collection}
-    
-    def _mongodb_filter(self, collection, filters: Dict, limit: int) -> List[Dict]:
-        """
-        Выполняет структурированную фильтрацию в MongoDB
+    # KROK 1: Filtrowanie MongoDB po podstawowych kryteriach
+    try:
+        print("Krok 1: Filtrowanie MongoDB po podstawowych kryteriach")
+        criteria = extract_criteria_from_prompt(query)
         
-        Args:
-            collection: MongoDB коллекция
-            filters (Dict): Фильтры для поиска
-            limit (int): Лимит результатов
-            
-        Returns:
-            List[Dict]: Результаты из MongoDB
-        """
-        if not filters:
-            filters = {}
+        # Używamy funkcji z main.py
+        mongo_search_result = search_listings(criteria)
+        mongo_listings = mongo_search_result["listings"]
         
-        # Строим MongoDB запрос
-        mongo_query = {}
         
-        # Фильтр по городу
-        if filters.get("city"):
-            mongo_query["city"] = {"$regex": filters["city"], "$options": "i"}
+        results["mongo_filtered_count"] = len(mongo_listings)
+        print(f"   Znaleziono {results['mongo_filtered_count']} wyników w MongoDB")
         
-        # Фильтр по району
-        if filters.get("district"):
-            mongo_query["district"] = {"$regex": filters["district"], "$options": "i"}
-        
-        # Фильтр по количеству комнат
-        if filters.get("rooms"):
-            if isinstance(filters["rooms"], list):
-                mongo_query["room_count"] = {"$in": filters["rooms"]}
-            else:
-                mongo_query["room_count"] = filters["rooms"]
-        
-        # Фильтр по цене
-        price_filter = {}
-        if filters.get("min_price"):
-            price_filter["$gte"] = filters["min_price"]
-        if filters.get("max_price"):
-            price_filter["$lte"] = filters["max_price"]
-        if price_filter:
-            mongo_query["price"] = price_filter
-        
-        # Фильтр по площади
-        area_filter = {}
-        if filters.get("min_area"):
-            area_filter["$gte"] = filters["min_area"]
-        if filters.get("max_area"):
-            area_filter["$lte"] = filters["max_area"]
-        if area_filter:
-            mongo_query["space_sm"] = area_filter
-        
-        # Фильтр по типу здания
-        if filters.get("building_type"):
-            mongo_query["building_type"] = filters["building_type"]
-        
-        # Фильтр по году постройки
-        if filters.get("min_year"):
-            mongo_query["build_year"] = {"$gte": str(filters["min_year"])}
-        
-        # Новые фильтры для продажи
-        if filters.get("market_type"):
-            mongo_query["market_type"] = filters["market_type"]
-        if filters.get("stan_wykonczenia"):
-            mongo_query["stan_wykonczenia"] = filters["stan_wykonczenia"]
-        if filters.get("building_material"):
-            mongo_query["building_material"] = filters["building_material"]
-        if filters.get("ogrzewanie"):
-            mongo_query["ogrzewanie"] = filters["ogrzewanie"]
-        
-        # Фильтр по году постройки (расширенный)
-        if filters.get("min_build_year") or filters.get("max_build_year"):
-            build_year_filter = {}
-            if filters.get("min_build_year"):
-                build_year_filter["$gte"] = str(filters["min_build_year"])
-            if filters.get("max_build_year"):
-                build_year_filter["$lte"] = str(filters["max_build_year"])
-            mongo_query["build_year"] = build_year_filter
-        
-        # Фильтр по czynszu (для аренды)
-        if filters.get("max_czynsz"):
-            mongo_query["czynsz"] = {"$lte": filters["max_czynsz"]}
-        
-        # Фильтры по дополнительным характеристикам
-        if filters.get("has_garage") is not None:
-            mongo_query["has_garage"] = filters["has_garage"]
-        if filters.get("has_parking") is not None:
-            mongo_query["has_parking"] = filters["has_parking"]
-        if filters.get("has_balcony") is not None:
-            mongo_query["has_balcony"] = filters["has_balcony"]
-        if filters.get("has_elevator") is not None:
-            mongo_query["has_elevator"] = filters["has_elevator"]
-        if filters.get("has_air_conditioning") is not None:
-            mongo_query["has_air_conditioning"] = filters["has_air_conditioning"]
-        if filters.get("pets_allowed") is not None:
-            mongo_query["pets_allowed"] = filters["pets_allowed"]
-        if filters.get("furnished") is not None:
-            mongo_query["furnished"] = filters["furnished"]
-        
-        # Выполняем запрос
-        try:
-            cursor = collection.find(mongo_query).limit(limit)
-            results = list(cursor)
-            print(f"   MongoDB запрос: {mongo_query}")
-            print(f"   MongoDB нашел: {len(results)} объявлений")
+        if results["mongo_filtered_count"] == 0:
+            print(" Brak wyników w MongoDB - koniec wyszukiwania")
             return results
+            
+    except Exception as e:
+        print(f"  Błąd filtrowania MongoDB: {e}")
+        return results
+    
+    # KROK 2: Jeśli są wyniki w MongoDB, to wykonujemy semantyczne wyszukiwanie
+    if results["mongo_filtered_count"] > 0:
+        try:
+            print("Krok 2: Wyszukiwanie semantyczne w przefiltrowanych wynikach")
+            
+            # Przygotowujemy listę ID do semantycznego wyszukiwania
+            filtered_ids = []
+            for listing in mongo_listings:
+                filtered_ids.append(listing.get('_id'))
+            
+            print(f"   Przeszukujemy semantycznie {len(filtered_ids)} wyników...")
+            
+            # Inicjalizujemy wektorową bazę danych
+            vector_db = RealEstateVectorDB()
+            
+            # Wykonujemy semantyczne wyszukiwanie tylko w przefiltrowanych wynikach
+            semantic_results = vector_db.semantic_search_in_subset(
+                query, 
+                filtered_ids, 
+                top_k=10
+            )
+            
+            # Dodajemy pełne dane z mongo_listings
+            for result in semantic_results:
+                # Znajdujemy pełne dane w mongo_listings po ID
+                full_data = None
+                for listing in mongo_listings:
+                    if listing.get('_id') == result['id']:
+                        full_data = listing
+                        break
+                
+                if full_data:
+                    semantic_result = {
+                        "id": result['id'],
+                        "title": full_data.get('title', 'Bez tytułu'),
+                        "price": full_data.get('price'),
+                        "room_count": full_data.get('room_count'),
+                        "space_sm": full_data.get('space_sm'),
+                        "city": full_data.get('city'),
+                        "district": full_data.get('district'),
+                        "link": full_data.get('link'),
+                        "semantic_score": result['score'],
+                        "type": "hybrid",
+                        "source_collection": full_data.get('source_collection')
+                    }
+                    results["semantic_results"].append(semantic_result)
+            
+            print(f"   Znaleziono {len(results['semantic_results'])} semantycznych wyników")
+            
         except Exception as e:
-            print(f"❌ Ошибка MongoDB запроса: {e}")
-            return []
+            print(f" Błąd wyszukiwania semantycznego: {e}")
+            # Jeśli semantyczne wyszukiwanie nie działa, zwracamy wyniki z MongoDB
+            for listing in mongo_listings[:10]:
+                mongo_result = {
+                    "id": listing.get('_id'),
+                    "title": listing.get('title', 'Bez tytułu'),
+                    "price": listing.get('price'),
+                    "room_count": listing.get('room_count'),
+                    "space_sm": listing.get('space_sm'),
+                    "city": listing.get('city'),
+                    "district": listing.get('district'),
+                    "link": listing.get('link'),
+                    "semantic_score": None,
+                    "type": "mongo_only",
+                    "source_collection": listing.get('source_collection')
+                }
+                results["semantic_results"].append(mongo_result)
     
-    def _combine_mongo_and_vector_results(self, mongo_results: List[Dict], 
-                                        vector_results: List[Dict], 
-                                        collection_type: str) -> List[Dict]:
-        """
-        Объединяет результаты из MongoDB с векторными результатами
-        
-        Args:
-            mongo_results: Результаты из MongoDB
-            vector_results: Результаты из векторного поиска
-            collection_type: Тип коллекции ('rent' или 'sale')
-            
-        Returns:
-            List[Dict]: Объединенные результаты
-        """
-        # Создаем словарь для быстрого поиска MongoDB документов по ID
-        mongo_dict = {str(doc["_id"]): doc for doc in mongo_results}
-        
-        combined = []
-        for vector_result in vector_results:
-            listing_id = vector_result["id"]
-            
-            if listing_id in mongo_dict:
-                # Берем полные данные из MongoDB (уже отфильтрованные)
-                full_listing = mongo_dict[listing_id].copy()
-                
-                # Добавляем информацию из векторного поиска
-                # Score - косинусное расстояние: чем ближе к 1, тем лучше
-                full_listing["semantic_score"] = float(vector_result["score"])
-                full_listing["collection_type"] = collection_type
-                full_listing["search_relevance"] = "hybrid_match"
-                
-                combined.append(full_listing)
-        
-        return combined
+    # KROK 3: Przygotowanie finalnych wyników
+    results["final_results"] = results["semantic_results"][:5]  # Top 5 wyników
     
-    def _format_mongo_results(self, mongo_results: List[Dict], collection_type: str) -> List[Dict]:
-        """
-        Форматирует результаты только из MongoDB (без семантического поиска)
-        
-        Args:
-            mongo_results: Результаты из MongoDB
-            collection_type: Тип коллекции
-            
-        Returns:
-            List[Dict]: Отформатированные результаты
-        """
-        formatted = []
-        for result in mongo_results:
-            result_copy = result.copy()
-            result_copy["collection_type"] = collection_type
-            result_copy["search_relevance"] = "filter_match"
-            result_copy["semantic_score"] = 0.0  # Нет семантического скора
-            formatted.append(result_copy)
-        
-        return formatted
-    
-    def _rank_and_limit_results(self, results: List[Dict], limit: int) -> List[Dict]:
-        """
-        Ранжирует и ограничивает результаты
-        
-        Args:
-            results: Все результаты поиска
-            limit: Максимальное количество результатов
-            
-        Returns:
-            List[Dict]: Отранжированные результаты
-        """
-        # Сортируем по семантическому скору (если есть), потом по цене
-        def sort_key(item):
-            semantic_score = item.get("semantic_score", 0.0)
-            price = item.get("price", 0)
-            
-            # Приоритет семантическому поиску, потом по убыванию цены
-            return (-semantic_score, -price)
-        
-        sorted_results = sorted(results, key=sort_key)
-        return sorted_results[:limit]
+    return results
 
+def display_hybrid_results(results):
+    
+    
+    print(f"WYNIKI HIBRYDOWEGO WYSZUKIWANIA:")
+    print("=" * 60)
+    print(f"Zapytanie: '{results['query']}'")
+    print(f"Wyników po filtrowaniu MongoDB: {results['mongo_filtered_count']}")
+    print(f"Semantycznych wyników: {len(results['semantic_results'])}")
+    print(f"Finalnych wyników: {len(results['final_results'])}")
+    
+    if results["final_results"]:
+        print(f"NAJLEPSZE WYNIKI:")
+        print("-" * 50)
+        
+        for i, result in enumerate(results["final_results"], 1):
+            print(f"\n{i}. {result['title'][:60]}...")
+            print(f"Cena: {result['price']} zł")
+            print(f"Pokoje: {result['room_count']}, Powierzchnia: {result['space_sm']} m2")
+            print(f"{result['city']}, {result['district']}")
+            
+            if result['semantic_score']:
+                print(f"Wynik semantyczny: {result['semantic_score']:.3f}")
+            
+            print(f" Link: {result['link'][:200]}...")
+            print(f" Typ: {result['type']}")
+    else:
+        print("\nNie znaleziono wyników")
 
 def test_hybrid_search():
-    """Функция для тестирования гибридного поиска"""
-    search_engine = HybridRealEstateSearch()
     
-    # Тест 1: Только структурированные фильтры
-    print("=== Тест 1: Только фильтры ===")
-    results1 = search_engine.search(
-        filters={"city": "Warszawa",  "max_price": 8000000},
-        listing_type="buy",
-        limit=1000
-    )
-    print(f"Найдено: {len(results1)} объявлений")
+    test_queries = [
+        "Chce kupić wykończone dwupokojowe mieszkanie w warszawie w dzielnicy Mokotów lub wola lub Praga-Poludnie do 850000 zlotych  na wysokim piętrze z widokiem na zielień lub park, powyżej 2010 roku"
+    ]
     
-    # Показываем результаты первого теста
-    if results1:
-        print(f"\nПервые {min(3, len(results1))} результатов (только фильтры):")
-        for i, result in enumerate(results1[:3], 1):
-            print(f"\n--- Результат {i} ---")
-            print(f"ID: {result['_id']}")
-            print(f"Заголовок: {result.get('title', 'N/A')}")
-            print(f"Цена: {result.get('price', 'N/A')} зл")
-            print(f"Комнаты: {result.get('room_count', 'N/A')}")
-            print(f"Площадь: {result.get('space_sm', 'N/A')} м²")
-            print(f"Город: {result.get('city', 'N/A')}")
-            if result.get('district'):
-                print(f"Район: {result.get('district', 'N/A')}")
-            print(f"Ссылка: {result.get('link', 'N/A')}")
+    print("TEST HIBRYDOWEGO WYSZUKIWANIA")
+    print("=" * 70)
     
-    # Тест 2: Семантический поиск + фильтры
-    print("\n=== Тест 2: Фильтры + семантика ===")
-    results2 = search_engine.search(
-        filters={"city": "Warszawa", "max_price": 8000000},
-        semantic_query="blizko centrum",
-        listing_type="buy",
-        limit=1000
-    )
-    print(f"Найдено: {len(results2)} объявлений")
+    for i, query in enumerate(test_queries, 1):
+        print(f"\n{'='*20} TEST {i} {'='*20}")
+        results = hybrid_search(query)
+        display_hybrid_results(results)
+        
+        if i < len(test_queries):
+            input("\nNaciśnij Enter aby kontynuować...")
     
-    # Показываем первые 5 результатов
-    if results2:
-        print(f"\nПервые {min(5, len(results2))} результатов:")
-        for i, result in enumerate(results2[:5], 1):
-            print(f"\n--- Результат {i} ---")
-            print(f"ID: {result['_id']}")
-            print(f"Заголовок: {result.get('title', 'N/A')}")
-            print(f"Семантический скор: {result.get('semantic_score', 0):.3f} (косинусное расстояние: чем ближе к 1, тем лучше)")
-            print(f"Цена: {result.get('price', 'N/A')} зл")
-            print(f"Комнаты: {result.get('room_count', 'N/A')}")
-            print(f"Площадь: {result.get('space_sm', 'N/A')} м²")
-            print(f"Город: {result.get('city', 'N/A')}")
-            if result.get('district'):
-                print(f"Район: {result.get('district', 'N/A')}")
-            print(f"Ссылка: {result.get('link', 'N/A')}")
-            if result.get('description'):
-                desc_preview = result['description'][:200] + "..." if len(result['description']) > 200 else result['description']
-                print(f"Описание: {desc_preview}")
-
+    print(f"\n{'='*70}")
+    print("\nTEST HIBRYDOWEGO WYSZUKIWANIA ZAKOŃCZONY")
 
 if __name__ == "__main__":
     test_hybrid_search()
