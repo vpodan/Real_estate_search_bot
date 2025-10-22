@@ -14,7 +14,6 @@ beautifulsoup4
 lxml
 selenium
 webdriver-manager
-# Для векторного поиска и embeddings
 langchain
 langchain-openai
 langchain-community
