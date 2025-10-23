@@ -19,6 +19,7 @@ langchain-core
 langchain-openai
 langchain-community
 langchain-chroma
+langchain-text-splitters
 chromadb
 sentence-transformers
 mcp
