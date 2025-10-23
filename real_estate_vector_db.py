@@ -5,7 +5,7 @@ from typing import List, Dict, Optional, Tuple
 from tqdm import tqdm
 import logging
 
-from langchain.schema import Document
+from langchain_core.documents import Document
 from langchain_chroma import Chroma
 from pymongo import MongoClient
 
@@ -333,7 +333,7 @@ class RealEstateVectorDB:
         return full_results
     
     def get_stats(self) -> Dict:
-        """Pobiera statystyki wektorowej bazy danych"""
+      
         try:
             all_docs = self.db.get(include=['metadatas'])
             total_count = len(all_docs['ids'])
@@ -376,18 +376,7 @@ class RealEstateVectorDB:
         top_k: int = 10,
         optimize_query: bool = True
     ) -> List[Dict]:
-        """
-        Wykonuje wyszukiwanie semantyczne tylko w podzbiorze ogłoszeń.
-        
-        Args:
-            query: Zapytanie wyszukiwania
-            subset_ids: Lista ID ogłoszeń do wyszukania
-            top_k: Liczba wyników
-            optimize_query: Czy optymalizować zapytanie
-            
-        Returns:
-            Lista wyników wyszukiwania
-        """
+       
         try:
             if optimize_query:
                 from real_estate_embedding_function import create_query_optimized_text
@@ -434,7 +423,7 @@ class RealEstateVectorDB:
             similarities = []
             
             for i, metadata in enumerate(filtered_metadatas):
-                # Pobieramy embedding dokumentu (musimy go przeliczyć)
+                # Pobieramy embedding dokumentu 
                 doc_text = filtered_documents[i]
                 doc_embedding = self.embedding_function.embed_query(doc_text)
                 
@@ -466,7 +455,7 @@ class RealEstateVectorDB:
             return []
 
     def clear_database(self):
-        """Czyści wektorową bazę danych"""
+       
         if os.path.exists(self.persist_directory):
             try:
                 shutil.rmtree(self.persist_directory)
@@ -478,15 +467,9 @@ class RealEstateVectorDB:
 
 
 def print_search_results(results: List[Dict], show_full: bool = False):
-    """
-    Ładnie wyświetla wyniki wyszukiwania.
-    
-    Args:
-        results: Wyniki wyszukiwania
-        show_full: Czy pokazywać pełne informacje
-    """
+
     if not results:
-        logger.info("❌ Nie znaleziono wyników")
+        logger.info("Nie znaleziono wyników")
         return
     
     logger.info(f"\n{'='*80}")
@@ -531,7 +514,6 @@ def print_search_results(results: List[Dict], show_full: bool = False):
 
 
 def main():
-    """Główna funkcja z CLI"""
     parser = argparse.ArgumentParser(
         description="Zarządzanie wektorową bazą danych nieruchomości"
     )
